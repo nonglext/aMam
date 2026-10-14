@@ -16,9 +16,9 @@ MODEL_NAME = os.environ.get("MODEL_NAME", "R4C3R/qwen2.5-coder-7b-instruct-heret
 
 app = Flask(__name__)
 
-MAX_MESSAGE_LENGTH = 4000
+MAX_MESSAGE_LENGTH = 16000
 MAX_SYSTEM_LENGTH = 2000
-MAX_MESSAGES = 40
+MAX_MESSAGES = 90
 VALID_ROLES = {"user", "assistant"}
 
 # Ограничение частоты запросов: не более RATE_LIMIT запросов за RATE_WINDOW секунд с одного IP
