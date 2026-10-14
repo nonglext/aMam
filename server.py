@@ -1,11 +1,18 @@
 import os
+import json
 import time
+import requests
 from collections import defaultdict, deque
 
 from flask import Flask, Response, jsonify, request, send_from_directory
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_FILES = {"index.html", "style.css", "script.js"}
+
+# Настройки для подключения к локальной модели (Ollama)
+RUNPOD_API_URL = os.environ.get("RUNPOD_API_URL", "").rstrip("/")
+RUNPOD_API_KEY = os.environ.get("RUNPOD_API_KEY", "ollama")
+MODEL_NAME = os.environ.get("MODEL_NAME", "R4C3R/qwen2.5-coder-7b-instruct-heretic:q4_k_m")
 
 app = Flask(__name__)
 
@@ -98,42 +105,63 @@ def validate_request(data):
 
 def generate_reply(messages, system):
     """
-    Заглушка ответа. Пока модель не подключена, возвращает тестовый Markdown по частям.
-    Позже заменить содержимое этой функции на запрос к вашему серверу с моделью,
-    сохранив yield для потоковой передачи. Параметр system содержит инструкции
-    пользователя (может быть пустой строкой).
+    Отправляет запрос к локальной модели через Ollama (OpenAI API) и стримит ответ.
     """
-    last_text = messages[-1]["content"]
-    instructions_note = "Инструкции для ИИ получены." if system else "Инструкции для ИИ не заданы."
+    if not RUNPOD_API_URL:
+        yield "**Ошибка:** Переменная окружения RUNPOD_API_URL не задана на Render."
+        return
 
-    reply = (
-        "## Тестовый ответ\n\n"
-        f"Вы написали: **{last_text}**\n\n"
-        "Модель пока не подключена, но интерфейс уже умеет:\n\n"
-        "- выводить ответ потоком, по частям\n"
-        "- форматировать *Markdown* и `inline-код`\n"
-        "- показывать блоки кода и таблицы\n\n"
-        "| Функция | Статус |\n"
-        "|---|---|\n"
-        "| Чаты и история | готово |\n"
-        "| Подключение модели | следующий шаг |\n\n"
-        "Пример кода:\n\n"
-        "```python\n"
-        "def hello(name):\n"
-        "    return f\"Привет, {name}!\"\n"
-        "```\n\n"
-        f"> {instructions_note}"
-    )
+    # Формируем сообщения в формате OpenAI API
+    api_messages = []
+    if system:
+        api_messages.append({"role": "system", "content": system})
+    api_messages.extend(messages)
 
-    chunk = ""
-    for char in reply:
-        chunk += char
-        if len(chunk) >= 3:
-            yield chunk
-            chunk = ""
-            time.sleep(0.02)
-    if chunk:
-        yield chunk
+    headers = {
+        "Content-Type": "application/json",
+    }
+    if RUNPOD_API_KEY:
+        headers["Authorization"] = f"Bearer {RUNPOD_API_KEY}"
+
+    payload = {
+        "model": MODEL_NAME,
+        "messages": api_messages,
+        "stream": True,
+        "temperature": 0.7,
+        "max_tokens": 4096,
+    }
+
+    try:
+        # Отправляем запрос на туннель (Pinggy / Cloudflare)
+        # Таймаут 100 секунд, так как у бесплатных туннелей есть ограничения
+        response = requests.post(
+            f"{RUNPOD_API_URL}/chat/completions",
+            headers=headers,
+            json=payload,
+            stream=True,
+            timeout=100
+        )
+        response.raise_for_status()
+
+        # Читаем поток данных от Ollama
+        for line in response.iter_lines():
+            if line:
+                line_text = line.decode("utf-8")
+                if line_text.startswith("data: "):
+                    data_str = line_text[6:]
+                    if data_str.strip() == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(data_str)
+                        delta = data["choices"][0]["delta"]
+                        if "content" in delta:
+                            yield delta["content"]
+                    except (json.JSONDecodeError, KeyError, IndexError):
+                        continue
+    except requests.exceptions.Timeout:
+        yield "\n\n**Ошибка:** Превышено время ожидания ответа от модели (100 секунд)."
+    except requests.exceptions.RequestException as e:
+        yield f"\n\n**Ошибка соединения с моделью:** {str(e)}"
 
 
 @app.route("/api/chat", methods=["POST"])
